@@ -91,8 +91,23 @@ export default function RoomClient({ roomId, name }: { roomId:string; name:strin
 
   const bindEditor = useCallback(async () => {
     if (!editorRef.current || !yTextRef.current || bindingRef.current) return;
-    const { MonacoBinding } = await import("y-monaco");
-    bindingRef.current = new MonacoBinding(yTextRef.current, editorRef.current.getModel(), new Set([editorRef.current]), providerRef.current?.awareness);
+    const model = editorRef.current.getModel();
+    const yText = yTextRef.current;
+    let applyingRemoteChange = false;
+    const reflectYText = () => {
+      const nextValue = yText.toString();
+      if (model.getValue() !== nextValue) {
+        applyingRemoteChange = true;
+        model.setValue(nextValue);
+        applyingRemoteChange = false;
+      }
+    };
+    const editorChange = model.onDidChangeContent(() => {
+      if (applyingRemoteChange || model.getValue() === yText.toString()) return;
+      yText.doc.transact(() => { yText.delete(0, yText.length); yText.insert(0, model.getValue()); });
+    });
+    yText.observe(reflectYText); reflectYText();
+    bindingRef.current = { destroy: () => { editorChange.dispose(); yText.unobserve(reflectYText); } };
   }, []);
 
   useEffect(() => {
