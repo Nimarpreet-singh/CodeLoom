@@ -8,7 +8,7 @@ A small-room, peer-to-peer coding classroom built for Vercel and MongoDB Atlas.
 - Classrooms with non-sequential invite codes, host controls, chat, and personal practice editors.
 - Isolated editors: the host lesson is read-only for learners, while every learner has an independent private editor. Hosts can review those private editors only when the classroom permission is enabled.
 - Browser-native audio/video, screen sharing, and presence for small peer-to-peer rooms.
-- JavaScript runs in a browser sandbox; the host can select JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Rust, PHP, or Kotlin. Non-JavaScript languages use the optional Piston-compatible compiler endpoint.
+- JavaScript runs in a browser sandbox; the host can select JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Rust, PHP, or Kotlin. The other languages use Judge0 CE's free public endpoint by default, with no API key.
 - A daily protected Vercel Cron MongoDB `ping` that keeps the Atlas M0 cluster active.
 - Atlas-backed fixed-window rate limits on registration, sign-in, and room-code join attempts.
 
@@ -18,7 +18,7 @@ This project deliberately uses browser peer-to-peer connections instead of a pai
 
 `y-webrtc` uses its public signaling service by default so browsers can find one another. It carries encrypted collaboration messages using the classroom-code password, but it is a free community service without an uptime guarantee. For a production-owned service, set up and configure a self-hosted y-webrtc signaling server and TURN server.
 
-The browser runner supports JavaScript without any service. Non-JavaScript compilation requires `PISTON_API_URL` and, when the provider requires it, `PISTON_AUTH_TOKEN`. Piston is open source; its public endpoint now requires authorization for education/non-commercial use, so obtain the free authorized endpoint/token or deploy your own Piston-compatible server. Never expose an unrestricted compiler without rate limits.
+The browser runner supports JavaScript without any service. The remaining listed languages execute through the shared Judge0 CE endpoint by default and have an Atlas-backed limit of 12 execution requests per IP per minute. This is a free shared service, not a production SLA. If usage grows, deploy your own Judge0 CE server and set `JUDGE0_URL` to it. Never expose an unrestricted compiler without rate limits.
 
 ## Local development
 
@@ -29,7 +29,7 @@ The browser runner supports JavaScript without any service. Non-JavaScript compi
 
 ## Vercel deployment
 
-Add the three required environment variables in Vercel Project Settings, import the repository, and deploy. `vercel.json` schedules `/api/cron/atlas-keepalive` once per day. Vercel attaches `Authorization: Bearer $CRON_SECRET` to that request; do not remove `CRON_SECRET`.
+Add the three required environment variables in Vercel Project Settings, import the repository, and deploy. You do not need to add a compiler API key. `vercel.json` schedules `/api/cron/atlas-keepalive` once per day. Vercel attaches `Authorization: Bearer $CRON_SECRET` to that request; do not remove `CRON_SECRET`.
 
 For Atlas M0, MongoDB currently documents automatic pausing after 30 days of inactivity. The daily database `ping` prevents a fully inactive cluster while Vercel Cron is active.
 
