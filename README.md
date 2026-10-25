@@ -6,9 +6,9 @@ A small-room, peer-to-peer coding classroom built for Vercel and MongoDB Atlas.
 
 - Account registration/sign-in using signed, http-only session cookies.
 - Classrooms with non-sequential invite codes, host controls, chat, and personal practice editors.
-- A live host lesson editor using Yjs + y-webrtc. Edits and cursors are sent directly between browsers; MongoDB stores the host snapshot for recovery.
+- Isolated editors: the host lesson is read-only for learners, while every learner has an independent private editor. Hosts can review those private editors only when the classroom permission is enabled.
 - Browser-native audio/video, screen sharing, and presence for small peer-to-peer rooms.
-- A sandboxed-in-a-Web-Worker JavaScript runner. It has a two-second timeout and does not send code to a third party.
+- JavaScript runs in a browser sandbox; the host can select JavaScript, TypeScript, Python, Java, C, C++, C#, Go, Rust, PHP, or Kotlin. Non-JavaScript languages use the optional Piston-compatible compiler endpoint.
 - A daily protected Vercel Cron MongoDB `ping` that keeps the Atlas M0 cluster active.
 - Atlas-backed fixed-window rate limits on registration, sign-in, and room-code join attempts.
 
@@ -18,7 +18,7 @@ This project deliberately uses browser peer-to-peer connections instead of a pai
 
 `y-webrtc` uses its public signaling service by default so browsers can find one another. It carries encrypted collaboration messages using the classroom-code password, but it is a free community service without an uptime guarantee. For a production-owned service, set up and configure a self-hosted y-webrtc signaling server and TURN server.
 
-The browser runner supports JavaScript only. The optional `/api/execute` Piston route remains available for self-hosted, multi-language execution; never expose an unrestricted public runner without rate limits.
+The browser runner supports JavaScript without any service. Non-JavaScript compilation requires `PISTON_API_URL` and, when the provider requires it, `PISTON_AUTH_TOKEN`. Piston is open source; its public endpoint now requires authorization for education/non-commercial use, so obtain the free authorized endpoint/token or deploy your own Piston-compatible server. Never expose an unrestricted compiler without rate limits.
 
 ## Local development
 

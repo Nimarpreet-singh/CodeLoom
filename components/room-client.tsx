@@ -2,230 +2,32 @@
 
 import dynamic from "next/dynamic";
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
-import type { OnMount } from "@monaco-editor/react";
+import { LANGUAGES, LANGUAGE_IDS, type LanguageId } from "@/lib/languages";
 
-const Editor = dynamic(() => import("@monaco-editor/react"), {
-  ssr: false,
-  loading: () => <div className="editor-loading">Loading your editor…</div>,
-});
+const Editor = dynamic(() => import("@monaco-editor/react"), { ssr:false, loading:() => <div className="editor-loading">Loading editor…</div> });
+type Policy={camera:boolean;microphone:boolean;screenShare:boolean;chat:boolean;studentEditor:boolean;studentCodeVisibleToHost:boolean;peerCodeVisible:boolean};
+type Room={id:string;title:string;joinCode:string;language:string;status:string;policy:Policy;teacherCode:string;version:number}; type Chat={id:string;version:number;authorName:string;body:string}; type Submission={userId:string;name:string;code:string;updatedAt:string};
+const hostRole=(r:string)=>r==="host"||r==="cohost";
 
-type Policy = { camera:boolean; microphone:boolean; screenShare:boolean; chat:boolean; studentEditor:boolean; studentCodeVisibleToHost:boolean; peerCodeVisible:boolean };
-type Room = { id:string; title:string; joinCode:string; language:string; status:string; policy:Policy; teacherCode:string; version:number };
-type Chat = { id:string; version:number; authorName:string; body:string; createdAt:string };
-type Person = { id:string; name:string; role:string };
-type RemoteStream = { id:string; stream:MediaStream };
-type Submission = { userId:string; name:string; code:string; updatedAt:string };
-
-const ToolIcon = ({ children }: { children: React.ReactNode }) => <span className="tool-icon">{children}</span>;
-const isHost = (role: string) => role === "host" || role === "cohost";
-
-export default function RoomClient({ roomId, name }: { roomId:string; name:string }) {
-  const [room, setRoom] = useState<Room | null>(null);
-  const [role, setRole] = useState("learner");
-  const [practiceCode, setPracticeCode] = useState("");
-  const [practiceVersion, setPracticeVersion] = useState(0);
-  const [tab, setTab] = useState<"lesson" | "practice" | "review">("lesson");
-  const [submissions, setSubmissions] = useState<Submission[]>([]);
-  const [reviewing, setReviewing] = useState<Submission | null>(null);
-  const [chat, setChat] = useState<Chat[]>([]);
-  const [message, setMessage] = useState("");
-  const [showSettings, setShowSettings] = useState(false);
-  const [status, setStatus] = useState("Connecting…");
-  const [error, setError] = useState("");
-  const [people, setPeople] = useState<Person[]>([]);
-  const [remoteStreams, setRemoteStreams] = useState<RemoteStream[]>([]);
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [micOn, setMicOn] = useState(false);
-  const [cameraOn, setCameraOn] = useState(false);
-  const [sharing, setSharing] = useState(false);
-  const [output, setOutput] = useState("");
-  const [running, setRunning] = useState(false);
-  const [editorReady, setEditorReady] = useState(false);
-
-  const roomRef = useRef<Room | null>(null);
-  const roleRef = useRef("learner");
-  const practiceRef = useRef({ code:"", version:0, dirty:false });
-  const editorRef = useRef<any>(null);
-  const yTextRef = useRef<any>(null);
-  const providerRef = useRef<any>(null);
-  const bindingRef = useRef<any>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const attachedPeers = useRef(new Set<string>());
-  const mediaAttachedPeers = useRef(new Set<string>());
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const fetchRoom = useCallback(async (resetEditors = false) => {
-    const response = await fetch(`/api/rooms/${roomId}`, { cache:"no-store" });
-    const data = await response.json();
-    if (!response.ok) { setError(data.error || "Unable to join this classroom."); return; }
-    setRoom(data.room); roomRef.current = data.room;
-    setRole(data.role); roleRef.current = data.role;
-    setSubmissions(data.learnerDocuments || []);
-    if (resetEditors) {
-      setPracticeCode(data.personalCode); setPracticeVersion(data.personalVersion);
-      practiceRef.current = { code:data.personalCode, version:data.personalVersion, dirty:false };
-    }
-    setStatus("Connected");
-  }, [roomId]);
-
-  useEffect(() => { fetchRoom(true); }, [fetchRoom]);
-  useEffect(() => { const timer = setInterval(() => { void fetchRoom(false); }, 4000); return () => clearInterval(timer); }, [fetchRoom]);
-
-  const attachPeer = useCallback((peerId: string) => {
-    const conn = providerRef.current?.room?.webrtcConns?.get(peerId);
-    const peer = conn?.peer;
-    if (!peer) return;
-    if (!attachedPeers.current.has(peerId)) {
-      attachedPeers.current.add(peerId);
-      peer.on("stream", (stream: MediaStream) => setRemoteStreams((current) => current.some((item) => item.id === peerId) ? current : [...current, { id:peerId, stream }]));
-      peer.on("close", () => { attachedPeers.current.delete(peerId); mediaAttachedPeers.current.delete(peerId); setRemoteStreams((current) => current.filter((item) => item.id !== peerId)); });
-      peer.on("error", () => setError("A participant media connection was interrupted."));
-    }
-    if (localStreamRef.current && !mediaAttachedPeers.current.has(peerId)) { peer.addStream(localStreamRef.current); mediaAttachedPeers.current.add(peerId); }
-  }, []);
-
-  const attachAllPeers = useCallback(() => {
-    const connections: Map<string, unknown> | undefined = providerRef.current?.room?.webrtcConns;
-    connections?.forEach((_, peerId) => attachPeer(peerId));
-  }, [attachPeer]);
-
-  const bindEditor = useCallback(async () => {
-    if (!editorRef.current || !yTextRef.current || bindingRef.current) return;
-    const model = editorRef.current.getModel();
-    const yText = yTextRef.current;
-    let applyingRemoteChange = false;
-    const reflectYText = () => {
-      const nextValue = yText.toString();
-      if (model.getValue() !== nextValue) {
-        applyingRemoteChange = true;
-        model.setValue(nextValue);
-        applyingRemoteChange = false;
-      }
-    };
-    const editorChange = model.onDidChangeContent(() => {
-      if (applyingRemoteChange || model.getValue() === yText.toString()) return;
-      yText.doc.transact(() => { yText.delete(0, yText.length); yText.insert(0, model.getValue()); });
-    });
-    yText.observe(reflectYText); reflectYText();
-    bindingRef.current = { destroy: () => { editorChange.dispose(); yText.unobserve(reflectYText); } };
-  }, []);
-
-  useEffect(() => {
-    if (!room || !editorRef.current || providerRef.current) return;
-    let disposed = false;
-    (async () => {
-      const Y = await import("yjs");
-      const { WebrtcProvider } = await import("y-webrtc");
-      if (disposed) return;
-      const doc = new Y.Doc();
-      const yText = doc.getText("lesson");
-      // Only the host initializes an empty shared document from durable storage.
-      if (isHost(roleRef.current) && roomRef.current?.teacherCode) yText.insert(0, roomRef.current.teacherCode);
-      const provider = new WebrtcProvider(`codeloom:${roomId}:lesson`, doc, {
-        password: roomRef.current?.joinCode,
-        maxConns: 8,
-      });
-      yTextRef.current = yText; providerRef.current = provider;
-      provider.awareness.setLocalStateField("user", { name, role:roleRef.current });
-      const refreshPeople = () => {
-        const entries = Array.from(provider.awareness.getStates().entries()).map(([id, state]: any) => ({ id:String(id), name:state.user?.name || "Participant", role:state.user?.role || "learner" }));
-        setPeople(entries);
-      };
-      provider.awareness.on("change", refreshPeople); refreshPeople();
-      provider.on("status", ({ connected }: { connected:boolean }) => setStatus(connected ? "Live sync connected" : "Reconnecting…"));
-      provider.on("peers", () => setTimeout(attachAllPeers, 250));
-      yText.observe(() => {
-        if (isHost(roleRef.current)) {
-          setStatus("Syncing lesson…");
-          if (saveTimer.current) clearTimeout(saveTimer.current);
-          saveTimer.current = setTimeout(() => persistLesson(), 1000);
-        }
-      });
-      await bindEditor();
-      setTimeout(attachAllPeers, 500);
-    })();
-    return () => {
-      disposed = true;
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      bindingRef.current?.destroy(); bindingRef.current = null;
-      providerRef.current?.destroy(); providerRef.current = null;
-      yTextRef.current = null; attachedPeers.current.clear(); mediaAttachedPeers.current.clear();
-    };
-  // Collaboration lifecycle should restart only if the classroom identity changes.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room?.id, roomId, editorReady, attachAllPeers, bindEditor]);
-
-  const persistLesson = useCallback(async () => {
-    if (!isHost(roleRef.current) || !yTextRef.current || !roomRef.current) return;
-    const code = yTextRef.current.toString();
-    const response = await fetch(`/api/rooms/${roomId}/code`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ code, version:roomRef.current.version }) });
-    const data = await response.json();
-    if (response.ok) { roomRef.current = { ...roomRef.current, version:data.version, teacherCode:code }; setRoom(roomRef.current); setStatus("All changes live"); }
-    else if (response.status === 409) { setError("The saved lesson changed elsewhere. Refresh the page before continuing."); }
-    else setError(data.error || "Could not save the lesson snapshot.");
-  }, [roomId]);
-
-  const onEditorMount: OnMount = (editor) => { bindingRef.current?.destroy(); bindingRef.current = null; editorRef.current = editor; setEditorReady(true); void bindEditor(); };
-
-  async function savePractice(nextCode: string, nextVersion: number) {
-    const response = await fetch(`/api/rooms/${roomId}/code`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ code:nextCode, version:nextVersion }) });
-    const data = await response.json();
-    if (response.ok) { practiceRef.current.version = data.version; setPracticeVersion(data.version); setStatus("Practice saved"); }
-    else if (response.status === 409) { practiceRef.current = { code:data.currentCode, version:data.currentVersion, dirty:false }; setPracticeCode(data.currentCode); setPracticeVersion(data.currentVersion); setError("Your practice editor changed in another tab, so it was refreshed."); }
-    else setError(data.error || "Could not save your practice.");
-  }
-
-  function updatePractice(nextCode: string) {
-    setPracticeCode(nextCode); practiceRef.current.code = nextCode; practiceRef.current.dirty = true; setStatus("Saving practice…");
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => { practiceRef.current.dirty = false; void savePractice(practiceRef.current.code, practiceRef.current.version); }, 800);
-  }
-
-  useEffect(() => {
-    let since = 0; let active = true;
-    const tick = async () => { try { const response = await fetch(`/api/rooms/${roomId}/events?since=${since}`, { cache:"no-store" }); if (response.ok) { const data = await response.json(); if (data.events.length) setChat((current) => [...current, ...data.events.filter((event:Chat) => !current.some((item) => item.id === event.id))]); since = data.version; } } finally { if (active) setTimeout(tick, 1800); } };
-    void tick(); return () => { active = false; };
-  }, [roomId]);
-
-  async function send(event: FormEvent) { event.preventDefault(); if (!message.trim()) return; const body = message; setMessage(""); const response = await fetch(`/api/rooms/${roomId}/events`, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ body }) }); if (!response.ok) setError((await response.json()).error || "Message could not be sent."); }
-  async function setPolicy(key: keyof Policy, value: boolean) { if (!room) return; const policy = { ...room.policy, [key]:value }; setRoom({ ...room, policy }); roomRef.current = { ...room, policy }; const response = await fetch(`/api/rooms/${roomId}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ policy }) }); if (!response.ok) setError("That setting could not be saved."); }
-  async function toggleLive() { if (!room) return; const status = room.status === "live" ? "waiting" : "live"; setRoom({ ...room, status }); roomRef.current = { ...room, status }; await fetch(`/api/rooms/${roomId}`, { method:"PATCH", headers:{"Content-Type":"application/json"}, body:JSON.stringify({ status }) }); }
-
-  async function enableMedia() {
-    if (localStreamRef.current) return localStreamRef.current;
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio:true, video:true });
-      stream.getAudioTracks().forEach((track) => track.enabled = false);
-      stream.getVideoTracks().forEach((track) => track.enabled = false);
-      localStreamRef.current = stream; setLocalStream(stream); attachAllPeers(); return stream;
-    } catch { setError("Camera and microphone access was not granted. You can allow it in your browser settings."); return null; }
-  }
-  async function toggleMic() { if (!room?.policy.microphone) return setError("The host has paused microphones."); const stream = await enableMedia(); if (!stream) return; const enabled = !micOn; stream.getAudioTracks().forEach((track) => track.enabled = enabled); setMicOn(enabled); }
-  async function toggleCamera() { if (!room?.policy.camera) return setError("The host has paused cameras."); const stream = await enableMedia(); if (!stream) return; const enabled = !cameraOn; stream.getVideoTracks().forEach((track) => track.enabled = enabled); setCameraOn(enabled); }
-  async function shareScreen() { if (!room?.policy.screenShare) return setError("The host has paused screen sharing."); try { const stream = await navigator.mediaDevices.getDisplayMedia({ video:true, audio:false }); const track = stream.getVideoTracks()[0]; track.addEventListener("ended", () => { setSharing(false); setLocalStream(localStreamRef.current); }); providerRef.current?.room?.webrtcConns?.forEach((connection:any) => connection.peer?.addStream(stream)); setLocalStream(stream); setSharing(true); } catch { /* User dismissed browser sharing chooser. */ } }
-  function runCode() { const source = tab === "lesson" ? yTextRef.current?.toString() : tab === "review" ? reviewing?.code : practiceCode; if (!source?.trim()) return setError("Write some JavaScript before running it."); setRunning(true); setOutput(""); const frame = document.createElement("iframe"); frame.sandbox.add("allow-scripts"); frame.style.display = "none"; frame.srcdoc = `<script>window.addEventListener('message',e=>{try{const logs=[];const safeConsole={log:(...v)=>logs.push(v.map(x=>typeof x==='object'?JSON.stringify(x):String(x)).join(' '))};const result=Function('console',e.data)(safeConsole);parent.postMessage({type:'codeloom-result',output:logs.join('\\n')||(result===undefined?'Program finished with no output.':String(result))},'*')}catch(error){parent.postMessage({type:'codeloom-result',output:error.name+': '+error.message},'*')}})</script>`;
-    const complete = (output:string) => { clearTimeout(timeout); window.removeEventListener("message", receive); frame.remove(); setRunning(false); setOutput(output); };
-    const receive = (event:MessageEvent) => { if (event.source === frame.contentWindow && event.data?.type === "codeloom-result") complete(event.data.output); };
-    const timeout = setTimeout(() => complete("Execution stopped after 2 seconds."), 2000);
-    window.addEventListener("message", receive); document.body.appendChild(frame); frame.addEventListener("load", () => frame.contentWindow?.postMessage(source, "*")); }
-
-  useEffect(() => () => { localStreamRef.current?.getTracks().forEach((track) => track.stop()); }, []);
-
-  if (error && !room) return <main className="room-error"><h1>We couldn’t open this classroom.</h1><p>{error}</p><a className="button" href="/dashboard">Back to classrooms</a></main>;
-  const host = isHost(role); const lessonReadOnly = !host;
-  return <main className="room">
-    <header className="room-header"><a className="brand" href="/dashboard"><span className="brand-mark">ϟ</span>codeloom</a><div className="room-title"><span className={room?.status === "live" ? "status-live" : "status-wait"}/><strong>{room?.title || "Opening classroom…"}</strong><small>{room?.status === "live" ? "Live now" : "Waiting room"}</small></div><div className="room-actions">{host && <button className="share-code" onClick={() => navigator.clipboard.writeText(room?.joinCode || "")}>Invite · {room?.joinCode}</button>}<span className="room-me">{name.slice(0,2).toUpperCase()}</span></div></header>
-    <div className="room-layout">
-      <aside className="people-panel"><div className="panel-label">IN THE ROOM · {people.length || 1}</div>{people.length ? people.map((person) => <div className="you-row" key={person.id}><span className="presence"/><span className="person-initial">{person.name.slice(0,2).toUpperCase()}</span><span>{person.name} {person.name === name && <small>you</small>}</span></div>) : <div className="alone">Waiting for the secure room connection…</div>}{host && room?.policy.studentCodeVisibleToHost && <div className="review-list"><div className="panel-label">LEARNER WORK</div>{submissions.length ? submissions.map((submission) => <button key={submission.userId} onClick={() => { setReviewing(submission); setTab("review"); }}>{submission.name}<span>Review →</span></button>) : <p>Learner work appears after they begin coding.</p>}</div>}<div className="media-note"><ToolIcon>◉</ToolIcon><div><strong>Peer-to-peer call</strong><p>Best for small classes. Video is sent directly between participants.</p></div></div></aside>
-      <section className="workspace"><div className="workspace-top"><div className="tabs"><button className={tab === "lesson" ? "active" : ""} onClick={() => setTab("lesson")}>Teacher&apos;s lesson</button>{!host && <button className={tab === "practice" ? "active" : ""} onClick={() => setTab("practice")}>My practice</button>}{host && reviewing && <button className={tab === "review" ? "active" : ""} onClick={() => setTab("review")}>{reviewing.name}&apos;s work</button>}</div><div className="editor-actions"><button onClick={runCode} disabled={running}>{running ? "Running…" : "▶ Run JS"}</button><div className="editor-status"><i/> {status}</div></div></div>
-        {tab === "lesson" ? <div className="lesson-view"><Editor height="100%" theme="vs-dark" language="javascript" onMount={onEditorMount} options={{ readOnly:lessonReadOnly, minimap:{enabled:false}, fontSize:14, padding:{top:18}, automaticLayout:true }}/>{lessonReadOnly && <span className="read-only">READ ONLY · LIVE HOST LESSON</span>}</div> : tab === "review" ? <div className="lesson-view"><Editor height="100%" theme="vs-dark" language="javascript" value={reviewing?.code || ""} options={{ readOnly:true, minimap:{enabled:false}, fontSize:14, padding:{top:18}, automaticLayout:true }}/><span className="read-only">READ ONLY · LEARNER PRACTICE</span></div> : <div className="editor-wrap"><Editor height="100%" theme="vs-dark" language="javascript" value={practiceCode} onChange={(value) => updatePractice(value || "")} options={{ readOnly:!room?.policy.studentEditor, minimap:{enabled:false}, fontSize:14, padding:{top:18}, automaticLayout:true }}/>{!room?.policy.studentEditor && <div className="editor-locked">The host has paused learner editors.</div>}</div>}
-        {output && <pre className="run-output">{output}</pre>}
-        {localStream && <video className="local-video" autoPlay muted playsInline ref={(element) => { if (element && element.srcObject !== localStream) element.srcObject = localStream; }}/>} {remoteStreams.map((remote) => <video className="remote-video" autoPlay playsInline key={remote.id} ref={(element) => { if (element && element.srcObject !== remote.stream) element.srcObject = remote.stream; }}/>) }
-        <div className="call-dock"><button className={micOn ? "media-on" : ""} title="Toggle microphone" onClick={toggleMic} disabled={!room?.policy.microphone}><ToolIcon>⌁</ToolIcon><small>Mic</small></button><button className={cameraOn ? "media-on" : ""} title="Toggle camera" onClick={toggleCamera} disabled={!room?.policy.camera}><ToolIcon>◉</ToolIcon><small>Camera</small></button><button className={sharing ? "media-on" : ""} title="Share screen" onClick={shareScreen} disabled={!room?.policy.screenShare}><ToolIcon>▣</ToolIcon><small>Present</small></button><span className="dock-rule"/>{host && <button className="live-button" onClick={toggleLive}>{room?.status === "live" ? "End live class" : "Start class"}</button>}<button className="settings-button" onClick={() => setShowSettings(!showSettings)}>⚙</button></div>
-      </section>
-      <aside className="chat-panel"><div className="chat-head"><strong>Chat</strong><span>{room?.policy.chat ? "Open" : "Paused"}</span></div><div className="messages">{chat.length === 0 ? <div className="chat-empty">Questions, links, and helpful notes will live here.</div> : chat.map((item) => <article key={item.id}><b>{item.authorName}</b><p>{item.body}</p></article>)}</div><form className="message-form" onSubmit={send}><input disabled={!room?.policy.chat} value={message} onChange={(event) => setMessage(event.target.value)} placeholder={room?.policy.chat ? "Message everyone…" : "Chat paused by host"}/><button disabled={!room?.policy.chat}>↑</button></form></aside>
-    </div>
-    {showSettings && host && room && <div className="settings-popover"><div><h3>Classroom controls</h3><button onClick={() => setShowSettings(false)}>×</button></div><p>Decide how people can participate.</p>{([['camera','Allow cameras'],['microphone','Allow microphones'],['screenShare','Allow screen sharing'],['chat','Enable class chat'],['studentEditor','Enable learner editors'],['studentCodeVisibleToHost','Let hosts view learner code'],['peerCodeVisible','Let learners view each other’s code']] as [keyof Policy,string][]).map(([key,label]) => <label key={key}><span>{label}</span><input type="checkbox" checked={room.policy[key]} onChange={(event) => setPolicy(key,event.target.checked)}/><i/></label>)}</div>}
-    {error && <div className="toast">{error}<button onClick={() => setError("")}>×</button></div>}
-  </main>;
+export default function RoomClient({roomId,name}:{roomId:string;name:string}){
+ const [room,setRoom]=useState<Room|null>(null),[role,setRole]=useState("learner"),[lesson,setLesson]=useState(""),[lessonVersion,setLessonVersion]=useState(0),[practice,setPractice]=useState(""),[practiceVersion,setPracticeVersion]=useState(0),[tab,setTab]=useState<"lesson"|"practice"|"review">("lesson"),[review,setReview]=useState<Submission|null>(null),[submissions,setSubmissions]=useState<Submission[]>([]),[chat,setChat]=useState<Chat[]>([]),[message,setMessage]=useState(""),[status,setStatus]=useState("Connecting…"),[error,setError]=useState(""),[settings,setSettings]=useState(false),[output,setOutput]=useState(""),[running,setRunning]=useState(false),[light,setLight]=useState(false),[media,setMedia]=useState<MediaStream|null>(null),[mic,setMic]=useState(false),[camera,setCamera]=useState(false),[remote,setRemote]=useState<{id:string;stream:MediaStream}[]>([]);
+ const roomRef=useRef<Room|null>(null), roleRef=useRef("learner"), lessonRef=useRef({code:"",version:0,dirty:false}), practiceRef=useRef({code:"",version:0,dirty:false}), timer=useRef<ReturnType<typeof setTimeout>|null>(null), providerRef=useRef<any>(null), mediaRef=useRef<MediaStream|null>(null), wiredPeers=useRef(new Set<string>());
+ const isHost=hostRole(role); const roomLanguage=room?.language ?? "javascript"; const language=((roomLanguage in LANGUAGES?roomLanguage:"javascript") as LanguageId); const editorLanguage=LANGUAGES[language].monaco;
+ const load=useCallback(async(initial=false)=>{const res=await fetch(`/api/rooms/${roomId}`,{cache:"no-store"});const data=await res.json();if(!res.ok){setError(data.error||"Unable to open classroom.");return;}setRoom(data.room);roomRef.current=data.room;setRole(data.role);roleRef.current=data.role;setSubmissions(data.learnerDocuments||[]);if(initial||!lessonRef.current.dirty){setLesson(data.room.teacherCode);setLessonVersion(data.room.version);lessonRef.current={code:data.room.teacherCode,version:data.room.version,dirty:false};}if(initial||!practiceRef.current.dirty){setPractice(data.personalCode);setPracticeVersion(data.personalVersion);practiceRef.current={code:data.personalCode,version:data.personalVersion,dirty:false};}setStatus("Connected");},[roomId]);
+ useEffect(()=>{void load(true);const id=setInterval(()=>void load(false),1800);return()=>clearInterval(id)},[load]);
+ useEffect(()=>{let alive=true;(async()=>{const Y=await import("yjs");const {WebrtcProvider}=await import("y-webrtc");if(!alive||providerRef.current)return;const doc=new Y.Doc();const provider=new WebrtcProvider(`codeloom:${roomId}:media`,doc,{password:roomRef.current?.joinCode,maxConns:6});providerRef.current=provider;const wire=()=>provider.room?.webrtcConns.forEach((connection:any,id:string)=>{if(wiredPeers.current.has(id))return;wiredPeers.current.add(id);connection.peer?.on("stream",(stream:MediaStream)=>setRemote(items=>items.some(item=>item.id===id)?items:[...items,{id,stream}]));connection.peer?.on("close",()=>setRemote(items=>items.filter(item=>item.id!==id)));if(mediaRef.current)connection.peer?.addStream(mediaRef.current)});provider.on("status",({connected}:{connected:boolean})=>setStatus(connected?"Connected":"Reconnecting…"));provider.on("peers",()=>setTimeout(wire,250));setTimeout(wire,600);})();return()=>{alive=false;providerRef.current?.destroy();providerRef.current=null;wiredPeers.current.clear()}},[roomId]);
+ const save=async(kind:"lesson"|"practice")=>{const source=kind==="lesson"?lessonRef:practiceRef;const res=await fetch(`/api/rooms/${roomId}/code`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code:source.current.code,version:source.current.version})});const data=await res.json();if(!res.ok){setError(data.error||"Could not save code.");return;}source.current={...source.current,version:data.version,dirty:false};if(kind==="lesson"){setLessonVersion(data.version);setRoom(current=>current?{...current,teacherCode:source.current.code,version:data.version}:current)}else setPracticeVersion(data.version);setStatus("All changes saved");};
+ const edit=(kind:"lesson"|"practice",code:string)=>{if(kind==="lesson"&&!hostRole(roleRef.current))return;const source=kind==="lesson"?lessonRef:practiceRef;source.current.code=code;source.current.dirty=true;kind==="lesson"?setLesson(code):setPractice(code);setStatus("Saving…");if(timer.current)clearTimeout(timer.current);timer.current=setTimeout(()=>void save(kind),650)};
+ useEffect(()=>()=>{if(timer.current)clearTimeout(timer.current);mediaRef.current?.getTracks().forEach(t=>t.stop())},[]);
+ useEffect(()=>{let since=0,active=true;const poll=async()=>{try{const r=await fetch(`/api/rooms/${roomId}/events?since=${since}`,{cache:"no-store"});if(r.ok){const d=await r.json();setChat(c=>[...c,...d.events.filter((e:Chat)=>!c.some(x=>x.id===e.id))]);since=d.version}}finally{if(active)setTimeout(poll,1800)}};void poll();return()=>{active=false}},[roomId]);
+ async function send(e:FormEvent){e.preventDefault();if(!message.trim())return;const body=message;setMessage("");const r=await fetch(`/api/rooms/${roomId}/events`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({body})});if(!r.ok)setError((await r.json()).error||"Message failed.")}
+ async function updateRoom(data:object){const r=await fetch(`/api/rooms/${roomId}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(data)});if(!r.ok)setError("Classroom setting could not be saved.")}
+ async function setPolicy(key:keyof Policy,value:boolean){if(!room)return;const policy={...room.policy,[key]:value};setRoom({...room,policy});roomRef.current={...room,policy};await updateRoom({policy})}
+ async function setLanguage(value:LanguageId){if(!room)return;const changed={...room,language:value};setRoom(changed);roomRef.current=changed;await updateRoom({language:value})}
+ async function run(){const code=tab==="lesson"?lesson:tab==="review"?review?.code:practice;if(!code?.trim())return setError("Write code before running it.");setRunning(true);setOutput("");if(language!=="javascript"){const r=await fetch("/api/execute",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({language,code})});const d=await r.json();setRunning(false);if(!r.ok)return setError(d.error||"Compilation failed.");return setOutput(d.output)}const frame=document.createElement("iframe");frame.sandbox.add("allow-scripts");frame.style.display="none";frame.srcdoc=`<script>onmessage=e=>{try{let l=[];let c={log:(...x)=>l.push(x.join(' '))};let r=Function('console',e.data)(c);parent.postMessage({o:l.join('\\n')||String(r??'Program finished with no output.')},'*')}catch(x){parent.postMessage({o:x.name+': '+x.message},'*')}}</script>`;const done=(value:string)=>{clearTimeout(timeout);window.removeEventListener("message",listen);frame.remove();setRunning(false);setOutput(value)};const listen=(e:MessageEvent)=>{if(e.source===frame.contentWindow&&e.data?.o)done(e.data.o)};const timeout=setTimeout(()=>done("Execution stopped after 2 seconds."),2000);window.addEventListener("message",listen);document.body.appendChild(frame);frame.onload=()=>frame.contentWindow?.postMessage(code,"*")}
+ async function enable(){if(mediaRef.current)return mediaRef.current;try{const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:true});stream.getTracks().forEach(t=>t.enabled=false);mediaRef.current=stream;setMedia(stream);providerRef.current?.room?.webrtcConns?.forEach((c:any)=>c.peer?.addStream(stream));return stream}catch{setError("Allow camera/microphone access in your browser.");return null}}
+ async function toggleMedia(type:"audio"|"video"){if(!room?.policy[type==="audio"?"microphone":"camera"])return setError("The host has disabled this control.");const stream=await enable();if(!stream)return;const on=type==="audio"?!mic:!camera;stream.getTracks().filter(t=>t.kind===type).forEach(t=>t.enabled=on);type==="audio"?setMic(on):setCamera(on)}
+ async function shareScreen(){if(!room?.policy.screenShare)return setError("The host has disabled screen sharing.");try{const stream=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});providerRef.current?.room?.webrtcConns?.forEach((c:any)=>c.peer?.addStream(stream));stream.getVideoTracks()[0]?.addEventListener("ended",()=>stream.getTracks().forEach(track=>track.stop()))}catch{/* chooser closed */}}
+ if(error&&!room)return <main className="room-error"><h1>Couldn’t open classroom</h1><p>{error}</p><a className="button" href="/dashboard">Back</a></main>;
+ return <main className={`room${light?" light":""}`}><header className="room-header"><a className="brand" href="/dashboard"><span className="brand-mark">ϟ</span>codeloom</a><div className="room-title"><span className={room?.status==="live"?"status-live":"status-wait"}/><strong>{room?.title||"Opening…"}</strong><small>{room?.status==="live"?"Live now":"Waiting room"}</small></div><div className="room-actions">{isHost&&<><button className="share-code" onClick={()=>navigator.clipboard.writeText(`${location.origin}/room/${roomId}`)}>Copy link</button><button className="share-code" onClick={()=>navigator.clipboard.writeText(room?.joinCode||"")}>Code · {room?.joinCode}</button></>}<button className="share-code" onClick={()=>setLight(!light)}>{light?"☾ Dark":"☀ Light"}</button><span className="room-me">{name.slice(0,2).toUpperCase()}</span></div></header><div className="room-layout"><aside className="people-panel"><div className="panel-label">PARTICIPANTS</div><div className="you-row"><span className="presence"/><span className="person-initial">{name.slice(0,2).toUpperCase()}</span>{name} <small>you</small></div>{isHost&&room?.policy.studentCodeVisibleToHost&&<div className="review-list"><div className="panel-label">LEARNER WORK</div>{submissions.length?submissions.map(s=><button key={s.userId} onClick={()=>{setReview(s);setTab("review")}}>{s.name}<span>Review →</span></button>):<p>Private learner work appears here after they start coding.</p>}</div>}<div className="media-note"><span>◉</span><div><strong>Small-room call</strong><p>Peer-to-peer audio/video for up to six people.</p></div></div></aside><section className="workspace"><div className="workspace-top"><div className="tabs"><button className={tab==="lesson"?"active":""} onClick={()=>setTab("lesson")}>Host lesson</button>{!isHost&&<button className={tab==="practice"?"active":""} onClick={()=>setTab("practice")}>My private editor</button>}{isHost&&review&&<button className={tab==="review"?"active":""} onClick={()=>setTab("review")}>{review.name}&apos;s editor</button>}</div><div className="editor-actions">{isHost?<select value={language} onChange={e=>void setLanguage(e.target.value as LanguageId)}>{LANGUAGE_IDS.map(id=><option value={id} key={id}>{LANGUAGES[id].label}</option>)}</select>:<span className="language-label">{LANGUAGES[language].label}</span>}<button onClick={()=>void run()} disabled={running}>{running?"Running…":`▶ Run ${LANGUAGES[language].label}`}</button><span className="editor-status"><i/> {status}</span></div></div>{tab==="lesson"?<div className="lesson-view"><Editor height="100%" theme={light?"light":"vs-dark"} language={editorLanguage} value={lesson} onChange={v=>edit("lesson",v||"")} options={{readOnly:!isHost,minimap:{enabled:false},fontSize:14,padding:{top:18},automaticLayout:true}}/>{!isHost&&<span className="read-only">READ ONLY · HOST LESSON</span>}</div>:tab==="review"?<div className="lesson-view"><Editor height="100%" theme={light?"light":"vs-dark"} language={editorLanguage} value={review?.code||""} options={{readOnly:true,minimap:{enabled:false},fontSize:14,padding:{top:18},automaticLayout:true}}/><span className="read-only">READ ONLY · PRIVATE LEARNER WORK</span></div>:<div className="editor-wrap"><Editor height="100%" theme={light?"light":"vs-dark"} language={editorLanguage} value={practice} onChange={v=>edit("practice",v||"")} options={{readOnly:!room?.policy.studentEditor,minimap:{enabled:false},fontSize:14,padding:{top:18},automaticLayout:true}}/></div>}{output&&<pre className="run-output">{output}</pre>}{media&&<video className="local-video" autoPlay muted playsInline ref={el=>{if(el&&el.srcObject!==media)el.srcObject=media}}/>}{remote.map(item=><video key={item.id} className="remote-video" autoPlay playsInline ref={el=>{if(el&&el.srcObject!==item.stream)el.srcObject=item.stream}}/>)}<div className="call-dock"><button className={mic?"media-on":""} onClick={()=>void toggleMedia("audio")} disabled={!room?.policy.microphone}>⌁<small>Mic</small></button><button className={camera?"media-on":""} onClick={()=>void toggleMedia("video")} disabled={!room?.policy.camera}>◉<small>Camera</small></button><button onClick={()=>void shareScreen()} disabled={!room?.policy.screenShare}>▣<small>Share</small></button><button onClick={()=>setSettings(!settings)}>⚙<small>Controls</small></button>{isHost&&<button className="live-button" onClick={()=>void updateRoom({status:room?.status==="live"?"waiting":"live"})}>{room?.status==="live"?"End class":"Start class"}</button>}</div></section><aside className="chat-panel"><div className="chat-head"><strong>Chat</strong><span>{room?.policy.chat?"Open":"Paused"}</span></div><div className="messages">{chat.length?chat.map(m=><article key={m.id}><b>{m.authorName}</b><p>{m.body}</p></article>):<div className="chat-empty">Questions and links appear here.</div>}</div><form className="message-form" onSubmit={send}><input value={message} onChange={e=>setMessage(e.target.value)} disabled={!room?.policy.chat} placeholder="Message everyone…"/><button disabled={!room?.policy.chat}>↑</button></form></aside></div>{settings&&isHost&&room&&<div className="settings-popover"><div><h3>Meeting controls</h3><button onClick={()=>setSettings(false)}>×</button></div>{([['camera','Allow cameras'],['microphone','Allow microphones'],['screenShare','Allow screen sharing'],['chat','Enable chat'],['studentEditor','Enable learner editors'],['studentCodeVisibleToHost','Host can review learner editors'],['peerCodeVisible','Learners can view each other']] as [keyof Policy,string][]).map(([key,label])=><label key={key}><span>{label}</span><input type="checkbox" checked={room.policy[key]} onChange={e=>void setPolicy(key,e.target.checked)}/><i/></label>)}</div>}{error&&<div className="toast">{error}<button onClick={()=>setError("")}>×</button></div>}</main>
 }
