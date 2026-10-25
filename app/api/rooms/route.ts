@@ -1,0 +1,11 @@
+import { NextResponse } from "next/server";
+import { z } from "zod";
+import { ObjectId } from "mongodb";
+import { db, ensureIndexes } from "@/lib/db";
+import { requireSession } from "@/lib/http";
+import { defaultPolicy } from "@/lib/types";
+
+const createSchema = z.object({ title: z.string().trim().min(1).max(100) });
+const generateCode = () => Array.from({ length: 6 }, () => "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(Math.random() * 32)]).join("");
+export async function GET() { const auth = await requireSession(); if ("error" in auth) return auth.error; const database = await db(); const memberships = await database.collection("roomMembers").find({ userId: auth.session.userId }).sort({ updatedAt: -1 }).toArray(); const roomIds = memberships.map((m) => m.roomId); const rooms = await database.collection("rooms").find({ _id: { $in: roomIds } }).sort({ updatedAt: -1 }).toArray(); const membershipByRoom = new Map(memberships.map((m) => [m.roomId.toString(), m.role])); return NextResponse.json({ rooms: rooms.map((room) => ({ _id: room._id, title: room.title, joinCode: room.joinCode, status: room.status, language: room.language, updatedAt: room.updatedAt, role: membershipByRoom.get(room._id.toString()) })) }); }
+export async function POST(request: Request) { const auth = await requireSession(); if ("error" in auth) return auth.error; try { const { title } = createSchema.parse(await request.json()); await ensureIndexes(); const database = await db(); let joinCode = generateCode(); while (await database.collection("rooms").findOne({ joinCode })) joinCode = generateCode(); const now = new Date(); const room = { title, joinCode, hostId: auth.session.userId, status: "waiting", language: "javascript", policy: defaultPolicy, createdAt: now, updatedAt: now, version: 0, teacherCode: "" }; const result = await database.collection("rooms").insertOne(room); await database.collection("roomMembers").insertOne({ roomId: result.insertedId, userId: auth.session.userId, role: "host", joinedAt: now, updatedAt: now }); return NextResponse.json({ room: { id: result.insertedId.toString(), ...room } }, { status: 201 }); } catch (error) { return NextResponse.json({ error: error instanceof z.ZodError ? "Classroom names must be 1–100 characters." : "Could not create classroom." }, { status: 400 }); } }
